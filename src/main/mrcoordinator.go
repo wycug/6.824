@@ -9,7 +9,10 @@ package main
 // Please do not change this file.
 //
 
-import "6.824/mr"
+import (
+	"6.824/mr"
+	"os/exec"
+)
 import "time"
 import "os"
 import "fmt"
@@ -19,11 +22,24 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: mrcoordinator inputfiles...\n")
 		os.Exit(1)
 	}
-
+	clearFiles()
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)
 	}
 
 	time.Sleep(time.Second)
+}
+
+func clearFiles() {
+	cmdStr := "rm mr-out*"
+	runCmd := exec.Command("/bin/bash", "-c", cmdStr)
+	_, err := runCmd.CombinedOutput()
+	if err != nil {
+		fmt.Println("命令执行失败")
+	} else {
+
+		fmt.Println("命令执行成功")
+	}
+
 }
