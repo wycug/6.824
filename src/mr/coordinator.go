@@ -18,7 +18,6 @@ type Coordinator struct {
 	MapNum        int
 	ReduceNum     int
 	WorkerNum     int
-	FreeWorkers   []int
 	Workers       int
 	RegisterMutex sync.Mutex
 	DoMapMutex    sync.Mutex
@@ -31,15 +30,20 @@ type Coordinator struct {
 const (
 	Waiting = iota
 	MapRunning
+	MapFinished
 	ReduceRuning
+	ReduceFinished
 	Finished
 )
+
+var TimeOut int64
 
 type Task struct {
 	Id        int
 	Status    int
 	InputFile string
 	ReduceNum int
+	StartTime int64
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -55,13 +59,13 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) Coordinate(job *Jobs, reply *Reply) error {
+	// PrintJobs(job)
 	if job.WorkerId == -1 {
 		c.RegisterWorker(job, reply)
 	}
 	switch c.Status {
 	case Waiting:
 		fmt.Errorf("waiting")
-		reply.Status = Waiting
 		break
 	case MapRunning:
 		c.doMap(job, reply)
@@ -71,40 +75,73 @@ func (c *Coordinator) Coordinate(job *Jobs, reply *Reply) error {
 		break
 	case Finished:
 		reply.Status = Finished
+		c.WorkerStatus[job.WorkerId] = Finished
 		break
 	}
-	fmt.Printf("coordinator : %v\n", c.Status)
 	return nil
 }
 func (c *Coordinator) RegisterWorker(job *Jobs, reply *Reply) {
 	c.RegisterMutex.Lock()
 	defer c.RegisterMutex.Unlock()
 	reply.Job.WorkerId = c.WorkerNum
+	job.WorkerId = c.WorkerNum
 	reply.Job.TempDir = c.TempDir
+	c.WorkerStatus = append(c.WorkerStatus, Waiting)
 	c.WorkerNum++
 }
 func (c *Coordinator) doMap(job *Jobs, reply *Reply) {
 	c.DoMapMutex.Lock()
 	defer c.DoMapMutex.Unlock()
+	if job.Status == MapFinished {
+		c.MapTask[job.MapId].Status = MapFinished
+		reply.Status = Waiting
+		//fmt.Printf("change reply.status to %v\n", reply.Status)
+	}
 	for i := 0; i < c.MapNum; i++ {
 		if c.MapTask[i].Status == Waiting {
 			c.MapTask[i].Status = MapRunning
+			c.MapTask[i].StartTime = time.Now().Unix()
 			reply.Task = c.MapTask[i]
 			reply.Status = MapRunning
+			reply.Job.MapId = i
 			return
 		}
 	}
+
+	for i := 0; i < c.MapNum; i++ {
+		if c.MapTask[i].Status != MapFinished {
+			if c.MapTask[i].Status == MapRunning && c.MapTask[i].StartTime <= time.Now().Unix()-10 {
+				c.MapTask[i].Status = Waiting
+			}
+			return
+		}
+	}
+
 	c.Status = ReduceRuning
 }
 
 func (c *Coordinator) doReduce(job *Jobs, reply *Reply) {
 	c.DoReduceMutex.Lock()
 	defer c.DoReduceMutex.Unlock()
+	if job.Status == ReduceFinished {
+		c.ReduceTask[job.ReduceId].Status = ReduceFinished
+		reply.Status = Waiting
+	}
 	for i := 0; i < c.ReduceNum; i++ {
 		if c.ReduceTask[i].Status == Waiting {
 			c.ReduceTask[i].Status = ReduceRuning
+			c.ReduceTask[i].StartTime = time.Now().Unix()
 			reply.Task = c.ReduceTask[i]
 			reply.Status = ReduceRuning
+			reply.Job.ReduceId = i
+			return
+		}
+	}
+	for i := 0; i < c.ReduceNum; i++ {
+		if c.ReduceTask[i].Status != ReduceFinished {
+			if c.ReduceTask[i].Status == ReduceRuning && c.ReduceTask[i].StartTime <= time.Now().Unix()-TimeOut {
+				c.ReduceTask[i].Status = Waiting
+			}
 			return
 		}
 	}
@@ -132,12 +169,16 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
 	// Your code here.file
-	if c.Status == Finished {
-		ret = true
+	if c.Status != Finished {
+		return false
 	}
-	return ret
+	for i := 0; i < c.ReduceNum; i++ {
+		if c.ReduceTask[i].Status != ReduceFinished {
+			return false
+		}
+	}
+	return true
 }
 
 //
@@ -146,9 +187,8 @@ func (c *Coordinator) Done() bool {
 // nReduce is the number of reduce tasks to use.
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	fmt.Println(files)
 	c := Coordinator{}
-
+	TimeOut = 10
 	// Your code here.
 	c.Status = Waiting
 	tempDir := fmt.Sprintf("temp-%v", time.Now())

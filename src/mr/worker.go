@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"time"
 )
 import "log"
 import "net/rpc"
@@ -51,13 +50,14 @@ func Worker(mapf func(string, string) []KeyValue,
 	job = Jobs{}
 	reply = Reply{}
 	job.WorkerId = -1
+	job.Status = Waiting
 	for {
 		call("Coordinator.Coordinate", &job, &reply)
-		fmt.Printf("%v,%v\n", reply.Status, reply.Task.InputFile)
 		if job.WorkerId == -1 {
-			job = reply.Job
+			register()
 		}
-		switch reply.Status {
+		job.Status = reply.Status
+		switch job.Status {
 		case MapRunning:
 			mapHandler(mapf)
 			break
@@ -65,10 +65,15 @@ func Worker(mapf func(string, string) []KeyValue,
 			reduceHandler(reducef)
 			break
 		case Finished:
-			fmt.Println("worker Finished")
+			fmt.Printf("worker %v Finished\n", job.WorkerId)
 			return
 		}
-		time.Sleep(2 * time.Second)
+
+		// job1 := job
+		// reply1 := reply
+		// fmt.Printf("%v,%v, %v\n", reply1.Status, reply1.Task.InputFile, job1.Status)
+
+		// time.Sleep(time.Second)
 	}
 }
 
@@ -79,9 +84,10 @@ func Worker(mapf func(string, string) []KeyValue,
 //
 func mapHandler(mapf func(string, string) []KeyValue) {
 
+	job.MapId = reply.Job.MapId
 	filename := reply.Task.InputFile
 	file, err := os.Open(fmt.Sprintf("%v", filename))
-	defer file.Close()
+
 	if err != nil {
 		nowPath, _ := os.Getwd()
 		log.Printf("%v", nowPath)
@@ -91,23 +97,24 @@ func mapHandler(mapf func(string, string) []KeyValue) {
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
+	file.Close()
 	kva := mapf(filename, string(content))
 	writeMapResultToTemp(kva)
+	job.Status = MapFinished
 }
 func writeMapResultToTemp(kva []KeyValue) {
 	files := make([]*os.File, reply.Task.ReduceNum)
-	buffers := make([]*bufio.Writer, 0, reply.Task.ReduceNum)
-	encoders := make([]*json.Encoder, 0, reply.Task.ReduceNum)
+	buffers := make([]*bufio.Writer, reply.Task.ReduceNum)
+	encoders := make([]*json.Encoder, reply.Task.ReduceNum)
 	for i := 0; i < reply.Task.ReduceNum; i++ {
-		filePath := fmt.Sprintf("%v/temp-%v-%v", job.TempDir, job.WorkerId, i)
-		file, err := os.Create(filePath)
+		file, err := ioutil.TempFile(job.TempDir, "tmp")
 		if err != nil {
-			log.Fatalf("%v Cannot create file %v\n", err, filePath)
+			log.Fatalf("Cannot create temp file err:%v\n", err)
 		}
 		buf := bufio.NewWriter(file)
-		files = append(files, file)
-		buffers = append(buffers, buf)
-		encoders = append(encoders, json.NewEncoder(buf))
+		files[i] = file
+		buffers[i] = buf
+		encoders[i] = json.NewEncoder(buf)
 	}
 	// write map outputs to temp files
 	for _, kv := range kva {
@@ -120,17 +127,16 @@ func writeMapResultToTemp(kva []KeyValue) {
 	for _, buf := range buffers {
 		buf.Flush()
 	}
-
 	// atomically rename temp files to ensure no one observes partial files
-	//for i, file := range files {
-	//	file.Close()
-	//	newPath := fmt.Sprintf("temp/%v-%v", reply.Task.WorkerId, i)
-	//	os.Rename(file.Name(), newPath)
-	//}
+	for i, file := range files {
+		filePath := fmt.Sprintf("%v/temp-%v-%v", job.TempDir, job.MapId, i)
+		os.Rename(file.Name(), filePath)
+		file.Close()
+	}
 }
 func reduceHandler(reducef func(string, []string) string) {
-
-	files, err := filepath.Glob(fmt.Sprintf("%v/temp-%v-%v", job.TempDir, "*", reply.Task.Id))
+	job.ReduceId = reply.Job.ReduceId
+	files, err := filepath.Glob(fmt.Sprintf("%v/temp-%v-%v", job.TempDir, "*", job.ReduceId))
 	if err != nil {
 		log.Fatalf("Cannot list reduce files, %v", err)
 	}
@@ -153,28 +159,29 @@ func reduceHandler(reducef func(string, []string) string) {
 	}
 
 	writeReduceResultToOutput(reducef, kvMap)
+	job.Status = ReduceFinished
 }
 func writeReduceResultToOutput(reducef func(string, []string) string, kvMap map[string][]string) {
 
 	// sort the kv map by key
-	keys := make([]string, 0, len(kvMap))
+	var keys []string
 	for k := range kvMap {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
 	// Create temp file
-	oname := fmt.Sprintf("mr-out-%v", reply.Task.Id)
-	file, err := os.Create(oname)
+
+	file, err := ioutil.TempFile("./", "tmp-mr-")
 	defer file.Close()
 	if err != nil {
-		log.Fatalf("Cannot create file %v, err:%v\n", oname, err)
+		log.Fatalf("Cannot create temp file , err:%v\n", err)
 	}
 
 	// Call reduce and write to temp file
 	for _, k := range keys {
 		v := reducef(k, kvMap[k])
-		_, err := fmt.Fprintf(file, "%v %v\n", k, reducef(k, kvMap[k]))
+		_, err := fmt.Fprintf(file, "%v %v\n", k, v)
 		if err != nil {
 			log.Fatalf("Cannot write mr output (%v, %v) to file, err:%v\n", k, v, err)
 		}
@@ -182,6 +189,20 @@ func writeReduceResultToOutput(reducef func(string, []string) string, kvMap map[
 	}
 
 	// atomically rename temp files to ensure no one observes partial files
+	oname := fmt.Sprintf("mr-out-%v", job.ReduceId)
+	os.Rename(file.Name(), oname)
+}
+
+func register() {
+	job.WorkerId = reply.Job.WorkerId
+	job.TempDir = reply.Job.TempDir
+}
+
+func mapFinished() {
+
+}
+
+func reduceFinished() {
 
 }
 

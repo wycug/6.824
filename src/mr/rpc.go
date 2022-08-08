@@ -6,7 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 import "strconv"
 
 //
@@ -26,12 +29,21 @@ type ExampleReply struct {
 type Jobs struct {
 	WorkerId int
 	TempDir  string
+	Status   int
+	MapId    int
+	ReduceId int
 }
 
 type Reply struct {
 	Task   Task
 	Status int
 	Job    Jobs
+}
+
+func PrintJobs(job *Jobs) {
+	fmt.Printf("\n======================\n")
+	fmt.Printf("WorkerId:%v\nTempDIr:%v\nStatus:%v\nMapId%v\nReduceId:%v\n", job.WorkerId, job.TempDir, job.Status, job.MapId, job.ReduceId)
+	fmt.Printf("======================\n")
 }
 
 // Cook up a unique-ish UNIX-domain socket name
