@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"math/rand"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -88,8 +89,52 @@ func (rf *Raft) GetHeartBeatOutTime() time.Duration {
 }
 
 func (rf *Raft) GetElectionOutTime() time.Duration {
-	//randTime := rand.Intn(150) + 150
-	return 150 * time.Millisecond
+	randTime := (rand.Int63()%150) + 150
+	return time.Duration(randTime) * time.Millisecond
+}
+
+func (rf *Raft) StartElection(){
+	rf.votedFor = rf.me
+	totoleVote := 1
+	args := &RequestVoteArgs{
+		CandidateId: rf.me,
+		Term: rf.currentTerm,
+		LastLogIndex: rf.commitIndex,
+		LastLogTerm: rf.currentTerm,
+
+	}
+
+	for peer := range rf.peers{
+		if rf.state != Condidate {
+			break
+		}
+		if peer==rf.me {
+			continue
+		}
+		DPrintf("%v request %v vote\n", rf.me, peer)
+		go func(peer int) {
+			reply := &RequestVoteReply{}
+			if rf.sendRequestVote(peer, args, reply) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if reply.VoteGranted {
+					if rf.state == Condidate {
+						totoleVote++
+						DPrintf("term:%v %v->%v\n", rf.currentTerm, peer, rf.me)
+						if totoleVote > len(rf.peers)/2 {
+							DPrintf("%v become Leader\n", rf.me)
+							rf.state = Leader
+							rf.heartbeatTimer.Reset(rf.GetHeartBeatOutTime())
+						}
+					}
+				}else if reply.Term > rf.currentTerm {
+					rf.state = Fllower
+					rf.votedFor = -1
+					rf.currentTerm = reply.Term
+				}
+			}
+		}(peer)
+	}
 }
 
 // return currentTerm and whether this server
@@ -99,8 +144,10 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	term = rf.currentTerm
-	if rf.NextIndex != nil {
+	if rf.state == Leader {
 		isleader = true
 	}
 	return term, isleader
@@ -191,20 +238,33 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	if args.Term < rf.currentTerm {
+		DPrintf("id:%v not vote to %v, because term %v<%v\n", rf.me, args.CandidateId, args.Term, rf.currentTerm)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
 	}
-	if rf.votedFor == -1 || (args.LastLogTerm >= rf.currentTerm && args.LastLogIndex > rf.commitIndex) {
+	if args.Term > rf.currentTerm {
+		rf.votedFor = -1
+		rf.state = Fllower
 		rf.currentTerm = args.Term
+	}
+	if (rf.votedFor == -1 || rf.votedFor==args.CandidateId){
+		DPrintf("vote success\n")
+		rf.currentTerm = args.Term
+		rf.votedFor = args.CandidateId
+		rf.electionTimer.Reset(rf.GetElectionOutTime())
 		reply.Term = args.Term
 		reply.VoteGranted = true
 		return
-	} else {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
 	}
+	DPrintf("id:%v not vote to %v, other case\n", rf.me, args.CandidateId)
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
 }
 
 //
@@ -238,6 +298,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	DPrintf("sendRequestVote state:%v\n", ok)
 	return ok
 }
 
@@ -298,9 +359,20 @@ func (rf *Raft) ticker() {
 		case <-rf.heartbeatTimer.C:
 			rf.mu.Lock()
 			if rf.state == Leader {
-
+				rf.BroadcastHeartBeat()
+				rf.heartbeatTimer.Reset(rf.GetHeartBeatOutTime())
 			}
+			rf.mu.Unlock()
+		case <-rf.electionTimer.C:
+			rf.mu.Lock()
+			DPrintf("%v start election term:%v\n", rf.me, rf.currentTerm)
+			rf.currentTerm++
+			rf.state = Condidate
+			rf.StartElection()
+			rf.electionTimer.Reset(rf.GetElectionOutTime())
+			rf.mu.Unlock()
 		}
+
 	}
 }
 
@@ -324,6 +396,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.votedFor = -1
+	rf.heartbeatTimer = time.NewTimer(rf.GetHeartBeatOutTime())
+	rf.electionTimer = time.NewTimer(rf.GetElectionOutTime())
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

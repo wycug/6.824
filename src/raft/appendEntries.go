@@ -1,5 +1,6 @@
 package raft
 
+
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
@@ -14,20 +15,27 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	if args.Entries == nil {
-		rf.heartbeatTimer.Reset(rf.GetHeartBeatOutTime())
-	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.state = Fllower
+	rf.currentTerm = args.Term
+	rf.electionTimer.Reset(rf.GetElectionOutTime())
 	reply.Term = args.Term
 	reply.Success = true
 }
 
-func (rf *Raft) SendHeatBeat() {
+func (rf *Raft) BroadcastHeartBeat() {
 	term := rf.currentTerm
 	leaderId := rf.me
 	prevLogIndex := rf.commitIndex
 	prevLogTerm := rf.currentTerm
 	leaderCommit := rf.lastApplied
+	rf.electionTimer.Reset(rf.GetElectionOutTime())
+
 	for i := 0; i < len(rf.peers); i++ {
+		if rf.me == i {
+			continue
+		}
 		args := &AppendEntriesArgs{}
 		reply := &AppendEntriesReply{}
 		args.Term = term
@@ -35,6 +43,9 @@ func (rf *Raft) SendHeatBeat() {
 		args.PrevLogTerm = prevLogTerm
 		args.PrevLogIndex = prevLogIndex
 		args.LeaderCommit = leaderCommit
-		rf.peers[i].Call("Raft.AppendEntries", args, reply)
+		go func(peer int) {
+			rf.peers[peer].Call("Raft.AppendEntries", args, reply)
+		}(i)
+
 	}
 }
